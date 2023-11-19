@@ -142,8 +142,10 @@ class MutuallyExclusiveOption(click.Option):
               help='Use interactive mode.')
 @click.option('--sort', is_flag=True,
               help='Sort files by name before upload it. Install the natsort Python package for natural sorting.')
+@click.option('--comment_to', default=None,
+              help='Comment, pass the id of the message to comment')
 def upload(files, to, config, delete_on_success, print_file_id, force_file, forward, directories, large_files, caption,
-           no_thumbnail, thumbnail_file, proxy, album, interactive, sort):
+           no_thumbnail, thumbnail_file, proxy, album, interactive, sort, comment_to):
     """Upload one or more files to Telegram using your personal account.
     The maximum file size is 2 GiB for free users and 4 GiB for premium accounts.
     By default, they will be saved in your saved messages.
@@ -188,7 +190,8 @@ def upload(files, to, config, delete_on_success, print_file_id, force_file, forw
     if album:
         client.send_files_as_album(to, files, delete_on_success, print_file_id, forward)
     else:
-        client.send_files(to, files, delete_on_success, print_file_id, forward)
+        client.send_files(to, files, delete_on_success, print_file_id, forward, 
+        comment_to_v=int(comment_to) if comment_to != None else None)
 
 
 @click.command()

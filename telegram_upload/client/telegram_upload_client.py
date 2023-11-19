@@ -52,15 +52,20 @@ class TelegramUploadClient(TelegramClient):
             media = self.send_files(entity, files_group, delete_on_success, print_file_id, forward, send_as_media=True)
             async_to_sync(self._send_album_media(entity, media))
 
-    def _send_file_message(self, entity, file, thumb, progress):
+    def _send_file_message(self, entity, file, thumb, progress, comment_to):
         message = self.send_file(entity, file, thumb=thumb,
                                  file_size=file.file_size if isinstance(file, File) else None,
                                  caption=file.file_caption, force_document=file.force_file,
-                                 progress_callback=progress, attributes=file.file_attributes)
+                                 progress_callback=progress, attributes=file.file_attributes,
+                                 comment_to=comment_to)
         if hasattr(message.media, 'document') and file.file_size != message.media.document.size:
             raise TelegramUploadDataLoss(
                 'Remote document size: {} bytes (local file size: {} bytes)'.format(
                     message.media.document.size, file.file_size))
+        return message
+
+    def _send_text_message(self, entity, text, progress, comment_to):
+        message = self.send_file(entity, None, caption=text, progress_callback=progress, comment_to=comment_to)
         return message
 
     async def _send_media(self, entity, file: File, progress):
@@ -90,7 +95,7 @@ class TelegramUploadClient(TelegramClient):
         )
 
     def send_one_file(self, entity, file: File, send_as_media: bool = False, thumb: Optional[str] = None,
-                      retries=RETRIES):
+                      retries=RETRIES, comment_to = None):
         message = None
         progress, bar = get_progress_bar('Uploading', file.file_name, file.file_size)
 
@@ -100,7 +105,8 @@ class TelegramUploadClient(TelegramClient):
                 if send_as_media:
                     message = async_to_sync(self._send_media(entity, file, progress))
                 else:
-                    message = self._send_file_message(entity, file, thumb, progress)
+                    #message = self._send_text_message(entity, "Bho", progress, comment_to)
+                    message = self._send_file_message(entity, file, thumb, progress, comment_to)
             finally:
                 bar.render_finish()
         except FloodWaitError as e:
@@ -116,14 +122,14 @@ class TelegramUploadClient(TelegramClient):
         return message
 
     def send_files(self, entity, files: Iterable[File], delete_on_success=False, print_file_id=False,
-                   forward=(), send_as_media: bool = False):
+                   forward=(), send_as_media: bool = False, comment_to_v = None):
         has_files = False
         messages = []
         for file in files:
             has_files = True
             thumb = file.get_thumbnail()
             try:
-                message = self.send_one_file(entity, file, send_as_media, thumb=thumb)
+                message = self.send_one_file(entity, file, send_as_media, thumb=thumb, comment_to=comment_to_v)
             finally:
                 if thumb and not file.is_custom_thumbnail and os.path.lexists(thumb):
                     os.remove(thumb)
