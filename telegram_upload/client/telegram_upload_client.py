@@ -112,11 +112,11 @@ class TelegramUploadClient(TelegramClient):
         except FloodWaitError as e:
             click.echo(f'{e}. Waiting for {e.seconds} seconds.', err=True)
             time.sleep(e.seconds)
-            message = self.send_one_file(entity, file, send_as_media, thumb, retries)
+            message = self.send_one_file(entity, file, send_as_media, thumb, retries, comment_to)
         except RPCError as e:
             if retries > 0:
                 click.echo(f'The file "{file.file_name}" could not be uploaded: {e}. Retrying...', err=True)
-                message = self.send_one_file(entity, file, send_as_media, thumb, retries - 1)
+                message = self.send_one_file(entity, file, send_as_media, thumb, retries - 1, comment_to)
             else:
                 click.echo(f'The file "{file.file_name}" could not be uploaded: {e}. It will not be retried.', err=True)
         return message
