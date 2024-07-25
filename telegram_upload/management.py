@@ -207,7 +207,11 @@ def upload(files, to, config, delete_on_success, print_file_id, force_file, forw
               help='Defines how to download large files split in Telegram. By default the files are not merged.')
 @click.option('-i', '--interactive', is_flag=True,
               help='Use interactive mode.')
-def download(from_, config, delete_on_success, proxy, split_files, interactive):
+@click.option('--check_exist', is_flag=True,
+              help='Check if the file was already downloaded. If so, skip it.')
+@click.option('--mark_downloaded', is_flag=True,
+              help='Set all the files as downloaded.')
+def download(from_, config, delete_on_success, proxy, split_files, interactive, check_exist, mark_downloaded):
     """Download all the latest messages that are files in a chat, by default download
     from "saved messages". It is recommended to forward the files to download to
     "saved messages" and use parameter ``--delete-on-success``. Forwarded messages will
@@ -231,7 +235,7 @@ def download(from_, config, delete_on_success, proxy, split_files, interactive):
         messages = client.find_files(from_)
     messages_cls = DOWNLOAD_SPLIT_FILE_MODES[split_files]
     download_files = messages_cls(reversed(list(messages)))
-    client.download_files(from_, download_files, delete_on_success)
+    client.download_files(from_, download_files, delete_on_success, check_exist, mark_downloaded)
 
 
 upload_cli = catch(upload)

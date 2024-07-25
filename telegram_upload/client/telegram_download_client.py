@@ -4,6 +4,7 @@ import io
 import pathlib
 import sys
 from typing import Iterable
+import os
 
 import typing
 
@@ -38,25 +39,47 @@ class TelegramDownloadClient(TelegramClient):
             if message.document:
                 yield message
 
-    def download_files(self, entity, download_files: Iterable[DownloadFile], delete_on_success: bool = False):
+    def download_files(self, entity, download_files: Iterable[DownloadFile], delete_on_success: bool = False, check_exist: bool = False, mark_downloaded: bool = False):
+        download_files_txt_path = "./downloaded_files.txt"
+        already_downloaded = False
         for download_file in download_files:
-            if download_file.size > free_disk_usage():
-                raise TelegramUploadNoSpaceError(
-                    'There is no disk space to download "{}". Space required: {}'.format(
-                        download_file.file_name, sizeof_fmt(download_file.size - free_disk_usage())
-                    )
-                )
-            progress, bar = get_progress_bar('Downloading', download_file.file_name, download_file.size)
-            file_name = download_file.file_name
-            try:
-                file_name = self.download_media(download_file.message, progress_callback=progress)
-                download_file.set_download_file_name(file_name)
-            finally:
-                bar.label = f'Downloaded  "{file_name}"'
-                bar.update(1, 1)
-                bar.render_finish()
-            if delete_on_success:
-                self.delete_messages(entity, [download_file.message])
+            if check_exist:
+                already_downloaded = False
+                # Check if the file was already downloaded
+                if not os.path.exists(download_files_txt_path):
+                    open(download_files_txt_path, 'a').close()
+                else:
+                    with open(download_files_txt_path, 'r') as file:
+                        lines = file.readlines()
+                        for line in lines:
+                            if line.strip() == download_file.file_name:
+                                print(f'File "{download_file.file_name}" already downloaded.')
+                                already_downloaded = True
+            if not already_downloaded:
+                if not mark_downloaded:
+                    # Download the file
+                    if download_file.size > free_disk_usage():
+                        raise TelegramUploadNoSpaceError(
+                            'There is no disk space to download "{}". Space required: {}'.format(
+                                download_file.file_name, sizeof_fmt(download_file.size - free_disk_usage())
+                            )
+                        )
+                    progress, bar = get_progress_bar('Downloading', download_file.file_name, download_file.size)
+                    file_name = download_file.file_name
+                    try:
+                        file_name = self.download_media(download_file.message, progress_callback=progress)
+                        download_file.set_download_file_name(file_name)
+                    finally:
+                        bar.label = f'Downloaded  "{file_name}"'
+                        bar.update(1, 1)
+                        bar.render_finish()
+                    if delete_on_success:
+                        self.delete_messages(entity, [download_file.message])
+                # Mark the file as downloaded
+                if check_exist:
+                    with open(download_files_txt_path, 'a') as file:
+                        file.write(f'{download_file.file_name}\n')
+                    print(f'File "{download_file.file_name}" added to the downloaded files list.')
 
     async def _download_file(
             self: 'TelegramClient',
