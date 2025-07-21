@@ -64,3 +64,4 @@ target/
 /.idea
 *.session*
 /venv
+downloaded_files.txt

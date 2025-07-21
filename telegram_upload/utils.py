@@ -75,3 +75,16 @@ def get_environment_integer(environment_name: str, default_value: int):
     if isinstance(value, int) or value.isdigit():
         return int(value)
     raise TelegramEnvironmentError(f"Environment variable {environment_name} must be an integer")
+
+def filter_messages_by_name(messages, keywords):
+    """Filters a list of messages, keeping only those whose filenames contain one of the provided keywords."""
+    from telegram_upload.client import get_message_file_attribute
+    if not keywords:
+        return messages
+
+    filtered_messages = []
+    for message in messages:
+        file_attribute = get_message_file_attribute(message)
+        if file_attribute and hasattr(file_attribute, 'file_name') and any(keyword in file_attribute.file_name for keyword in keywords):
+            filtered_messages.append(message)
+    return filtered_messages

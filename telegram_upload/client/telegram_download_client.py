@@ -31,8 +31,6 @@ class TelegramDownloadClient(TelegramClient):
         for message in self.iter_messages(entity):
             if message.document:
                 yield message
-            else:
-                break
 
     async def iter_files(self, entity):
         async for message in self.iter_messages(entity=entity):

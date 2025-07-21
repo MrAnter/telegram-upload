@@ -12,7 +12,7 @@ from telegram_upload.config import default_config, CONFIG_FILE
 from telegram_upload.download_files import KeepDownloadSplitFiles, JoinDownloadSplitFiles
 from telegram_upload.exceptions import catch
 from telegram_upload.upload_files import NoDirectoriesFiles, RecursiveFiles, NoLargeFiles, SplitFiles, is_valid_file
-from telegram_upload.utils import async_to_sync, amap, sync_to_async_iterator
+from telegram_upload.utils import async_to_sync, amap, sync_to_async_iterator, filter_messages_by_name
 
 
 try:
@@ -190,7 +190,7 @@ def upload(files, to, config, delete_on_success, print_file_id, force_file, forw
     if album:
         client.send_files_as_album(to, files, delete_on_success, print_file_id, forward)
     else:
-        client.send_files(to, files, delete_on_success, print_file_id, forward, 
+        client.send_files(to, files, delete_on_success, print_file_id, forward,
         comment_to_v=int(comment_to) if comment_to != None else None)
 
 
@@ -211,7 +211,9 @@ def upload(files, to, config, delete_on_success, print_file_id, force_file, forw
               help='Check if the file was already downloaded. If so, skip it.')
 @click.option('--mark_downloaded', is_flag=True,
               help='Set all the files as downloaded.')
-def download(from_, config, delete_on_success, proxy, split_files, interactive, check_exist, mark_downloaded):
+@click.option('--contains', multiple=True,
+              help='Filter files by name. Only files containing these words will be downloaded.')
+def download(from_, config, delete_on_success, proxy, split_files, interactive, check_exist, mark_downloaded, contains):
     """Download all the latest messages that are files in a chat, by default download
     from "saved messages". It is recommended to forward the files to download to
     "saved messages" and use parameter ``--delete-on-success``. Forwarded messages will
@@ -233,6 +235,7 @@ def download(from_, config, delete_on_success, proxy, split_files, interactive, 
         messages = async_to_sync(interactive_select_files(client, from_))
     else:
         messages = client.find_files(from_)
+        messages = filter_messages_by_name(messages, contains)
     messages_cls = DOWNLOAD_SPLIT_FILE_MODES[split_files]
     download_files = messages_cls(reversed(list(messages)))
     client.download_files(from_, download_files, delete_on_success, check_exist, mark_downloaded)
