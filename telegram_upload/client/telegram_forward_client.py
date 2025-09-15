@@ -30,15 +30,33 @@ class TelegramForwardClient(TelegramClient):
             for msg_id in ids_to_save:
                 f.write(f"{msg_id}\n")
 
+
+    def _resolve_entity_with_flood_wait(self, chat_identifier):
+        """Resolves a chat entity, handling FloodWaitError by waiting and retrying."""
+
+        while True:
+            try:
+                entity = self.get_entity(chat_identifier)
+                return entity
+            except FloodWaitError as e:
+                click.echo(f"Flood wait error: sleeping for {e.seconds} seconds.", err=True)
+                time.sleep(e.seconds)
+            except Exception as e:
+                click.echo(f"Error: Could not resolve chat entity '{chat_identifier}'. Details: {e}", err=True)
+                return None
+
+
     def forward_messages_from_chat(self, source_chat, destination_chat, files_only=False):
         """
         Forwards new messages from a source chat to a destination, tracking forwarded messages.
         """
-        try:
-            source_entity = self.get_entity(source_chat)
-            destination_entity = self.get_entity(destination_chat)
-        except Exception as e:
-            click.echo(f"Error: Could not resolve chat entities. Details: {e}", err=True)
+
+        source_entity = self._resolve_entity_with_flood_wait(source_chat)
+        if not source_entity:
+            return 0
+
+        destination_entity = self._resolve_entity_with_flood_wait(destination_chat)
+        if not destination_entity:
             return 0
 
         chat_name = getattr(source_entity, 'title', getattr(source_entity, 'username', f"ID: {source_entity.id}"))
