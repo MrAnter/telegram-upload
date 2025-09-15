@@ -246,15 +246,16 @@ def download(from_, config, delete_on_success, proxy, split_files, interactive, 
 @click.command()
 @click.option('--from', '-f', 'from_', required=True, help='Source chat (username, ID, etc.) to forward messages from.')
 @click.option('--to', required=True, help='Destination chat (username, ID, etc.) to forward messages to.')
+@click.option('--topic-name', default=None, help='The name of the topic. If it does not exist, it will be created. Provide an empty name (e.g., --topic-name "") to use the source channel name as topic name.')
 @click.option('--config', default=None, help='Configuration file to use.')
 @click.option('--proxy', default=None, help='Use an http proxy, socks4, socks5 or mtproxy.')
 @click.option('--files-only', is_flag=True, help='Forward only messages that contain files/documents.')
-def forward(from_, to, config, proxy, files_only):
+def forward(from_, to, topic_name, config, proxy, files_only):
     """Forward new messages from a single chat to a destination."""
     client = TelegramManagerClient(config or default_config(), proxy=proxy)
     client.start()
 
-    total_forwarded = client.forward_messages_from_chat(from_, to, files_only)
+    total_forwarded = client.forward_messages_from_chat(from_, to, files_only, topic_name)
 
     click.echo(f"\nDone. Total new messages forwarded in this session: {total_forwarded}")
 
