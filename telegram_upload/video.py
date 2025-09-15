@@ -38,7 +38,7 @@ def get_video_size(file):
     video_lines = re.findall(': Video: ([^\n]+)', stderr.decode('utf-8', errors='ignore'))
     if not video_lines:
         return
-    matchs = re.findall("(\d{2,6})x(\d{2,6})", video_lines[0])
+    matchs = re.findall(r"(\d{2,6})x(\d{2,6})", video_lines[0])
     if matchs:
         return [int(x) for x in matchs[0]]
 

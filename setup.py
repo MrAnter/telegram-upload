@@ -140,6 +140,7 @@ setup(
         "console_scripts": [
             "telegram-upload = telegram_upload.management:upload_cli",
             "telegram-download = telegram_upload.management:download_cli",
+            "telegram-forward = telegram_upload.management:forward_cli",
         ],
     },
 

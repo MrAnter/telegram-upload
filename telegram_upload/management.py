@@ -2,9 +2,11 @@
 
 """Console script for telegram-upload."""
 import os
+import time
 
 import click
 from telethon.tl.types import User
+from telethon.errors import FloodWaitError
 
 from telegram_upload.cli import show_checkboxlist, show_radiolist
 from telegram_upload.client import TelegramManagerClient, get_message_file_attribute
@@ -241,15 +243,36 @@ def download(from_, config, delete_on_success, proxy, split_files, interactive, 
     client.download_files(from_, download_files, delete_on_success, check_exist, mark_downloaded)
 
 
+@click.command()
+@click.option('--from', '-f', 'from_', required=True, help='Source chat (username, ID, etc.) to forward messages from.')
+@click.option('--to', required=True, help='Destination chat (username, ID, etc.) to forward messages to.')
+@click.option('--config', default=None, help='Configuration file to use.')
+@click.option('--proxy', default=None, help='Use an http proxy, socks4, socks5 or mtproxy.')
+@click.option('--files-only', is_flag=True, help='Forward only messages that contain files/documents.')
+def forward(from_, to, config, proxy, files_only):
+    """Forward new messages from a single chat to a destination."""
+    client = TelegramManagerClient(config or default_config(), proxy=proxy)
+    client.start()
+
+    total_forwarded = client.forward_messages_from_chat(from_, to, files_only)
+
+    click.echo(f"\nDone. Total new messages forwarded in this session: {total_forwarded}")
+
+
 upload_cli = catch(upload)
 download_cli = catch(download)
+forward_cli = catch(forward)
 
 
 if __name__ == '__main__':
     import sys
     import re
     sys.argv[0] = re.sub(r'(-script\.pyw|\.exe)?$', '', sys.argv[0])
-    commands = {'upload': upload_cli, 'download': download_cli}
+    commands = {
+        'upload': upload_cli,
+        'download': download_cli,
+        'forward': forward_cli,
+    }
     if len(sys.argv) < 2:
         sys.stderr.write('A command is required. Available commands: {}\n'.format(
             ', '.join(commands)

@@ -15,6 +15,7 @@ from telethon.version import __version__ as telethon_version
 
 from telegram_upload.client.telegram_download_client import TelegramDownloadClient
 from telegram_upload.client.telegram_upload_client import TelegramUploadClient
+from telegram_upload.client.telegram_forward_client import TelegramForwardClient
 from telegram_upload.config import SESSION_FILE
 from telegram_upload.exceptions import TelegramProxyError, InvalidApiFileError
 
@@ -82,7 +83,7 @@ def parse_proxy_string(proxy: Union[str, None]):
             proxy_parsed.username, proxy_parsed.password)
 
 
-class TelegramManagerClient(TelegramUploadClient, TelegramDownloadClient):
+class TelegramManagerClient(TelegramUploadClient, TelegramDownloadClient, TelegramForwardClient):
     def __init__(self, config_file, proxy=None, **kwargs):
         with open(config_file) as f:
             config = json.load(f)
