@@ -1,6 +1,8 @@
 import os
 import time
+import json
 import click
+from datetime import datetime
 
 from telethon import TelegramClient, types
 from telethon.errors import FloodWaitError
@@ -8,6 +10,7 @@ from telethon.tl.functions.channels import CreateForumTopicRequest
 from telethon.tl.types import MessageService, DocumentAttributeFilename, DocumentAttributeSticker, DocumentAttributeAnimated, DocumentAttributeAudio, DocumentAttributeImageSize, MessageMediaWebPage
 
 FORWARDED_LOG_FILE = 'forwarded_messages.log'
+FORWARD_TIMESTAMPS_FILE = 'forward_timestamps.json'
 
 
 class TelegramForwardClient(TelegramClient):
@@ -78,6 +81,24 @@ class TelegramForwardClient(TelegramClient):
         return topic_id
 
 
+    def _load_timestamps(self):
+        """Loads last run timestamps from JSON file."""
+        if not os.path.exists(FORWARD_TIMESTAMPS_FILE):
+            return {}
+        try:
+            with open(FORWARD_TIMESTAMPS_FILE, 'r') as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            click.echo(f"Warning: Could not decode {FORWARD_TIMESTAMPS_FILE}. Starting fresh.", err=True)
+            return {}
+
+
+    def _save_timestamps(self, timestamps):
+        """Save the timestamp dictionary to the JSON file."""
+        with open(FORWARD_TIMESTAMPS_FILE, 'w') as f:
+            json.dump(timestamps, f, indent=4)
+
+
     def forward_messages_from_chat(self, source_chat, destination_chat, files_only=False, topic_name=None):
         """
         Forwards new messages from a source chat to a destination, tracking forwarded messages.
@@ -92,6 +113,11 @@ class TelegramForwardClient(TelegramClient):
         destination_entity = self._resolve_entity_with_flood_wait(destination_chat)
         if not destination_entity:
             return 0
+
+        all_timestamps = self._load_timestamps()
+        last_run_timestamp = all_timestamps.get(str(source_entity.id), 0.0)
+        current_run_timestamp = time.time()
+        click.echo(f"Checking for messages newer than: {datetime.fromtimestamp(last_run_timestamp)}")
 
         final_topic_name = topic_name
 
@@ -131,26 +157,35 @@ class TelegramForwardClient(TelegramClient):
             click.echo(f"No messages found matching the criteria in '{chat_name}'.")
             return 0
 
-        new_messages = [
-            m for m in all_messages
-            if f"{source_entity.id}:{m.id}" not in self.forwarded_ids
-        ]
+        messages_to_process = []
+        processed_count = 0
+        for msg in all_messages:
+            unique_id = f"{source_entity.id}:{msg.id}"
+            is_already_processed = unique_id in self.forwarded_ids
 
-        skipped_count = len(all_messages) - len(new_messages)
-        if skipped_count > 0:
-            click.echo(f"Skipping {skipped_count} already forwarded message(s).")
+            if not is_already_processed:
+                messages_to_process.append(msg)
+            elif msg.edit_date and msg.edit_date.timestamp() > last_run_timestamp:
+                click.echo(f"  - Detected edit for message {msg.id}. Queuing for re-sending.")
+                messages_to_process.append(msg)
+            else:
+                processed_count += 1
 
-        if not new_messages:
-            click.echo(f"No new messages to forward from '{chat_name}'.")
+        if processed_count > 0:
+            click.echo(f"Skipping {processed_count} already processed and unchanged message(s).")
+
+        if not messages_to_process:
+            click.echo("No new or newly edited messages to send.")
+            all_timestamps[str(source_entity.id)] = current_run_timestamp
+            self._save_timestamps(all_timestamps)
             return 0
+
+        new_messages = messages_to_process
 
         new_messages.reverse()
 
-        chunk_size = 100
-        message_chunks = [new_messages[i:i + chunk_size] for i in range(0, len(new_messages), chunk_size)]
-
         click.echo(
-            f"Found {len(new_messages)} new messages. Forwarding to '{getattr(destination_entity, 'title', destination_chat)}' in {len(message_chunks)} chunk(s)...")
+            f"Found {len(new_messages)} new messages. Forwarding to '{getattr(destination_entity, 'title', destination_chat)}'...")
 
         total_forwarded_in_session = 0
         for message_to_send in new_messages:
@@ -170,9 +205,10 @@ class TelegramForwardClient(TelegramClient):
                             reply_to=destination_topic_id
                         )
 
-                    ids_for_log = {f"{source_entity.id}:{message_to_send.id}"}
-                    self._save_forwarded_ids(ids_for_log)
-                    self.forwarded_ids.update(ids_for_log)
+                    unique_id = f"{source_entity.id}:{message_to_send.id}"
+                    if unique_id not in self.forwarded_ids:
+                        self._save_forwarded_ids({unique_id})
+                        self.forwarded_ids.add(unique_id)
                     total_forwarded_in_session += 1
 
                     if total_forwarded_in_session % 100 == 0 or total_forwarded_in_session == len(new_messages):
@@ -186,5 +222,9 @@ class TelegramForwardClient(TelegramClient):
                 except Exception as e:
                     click.echo(f"An error occurred while sending message {message_to_send.id}: {e}", err=True)
                     break
+
+        all_timestamps[str(source_entity.id)] = current_run_timestamp
+        self._save_timestamps(all_timestamps)
+        click.echo(f"\nSuccessfully processed {total_forwarded_in_session} messages. Run timestamp updated.")
 
         return total_forwarded_in_session
