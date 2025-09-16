@@ -52,6 +52,7 @@ class TelegramForwardClient(TelegramClient):
 
     async def _get_or_create_topic_id(self, group_entity, topic_name):
         """Gets the ID of a topic, creating it if it doesn't exist."""
+        click.echo(f"Searching topic '{topic_name}'...")
         topic_id = None
         async for message in self.iter_messages(group_entity):
             if message.action and isinstance(message.action, types.MessageActionTopicCreate):
@@ -192,10 +193,19 @@ class TelegramForwardClient(TelegramClient):
             while True:
                 try:
                     if message_to_send.media and not isinstance(message_to_send.media, types.MessageMediaWebPage):
+                        file_name = ""
+                        if hasattr(message_to_send.media, 'document') and hasattr(message_to_send.media.document, 'attributes'):
+                            for attr in message_to_send.media.document.attributes:
+                                if isinstance(attr, types.DocumentAttributeFilename):
+                                    file_name = attr.file_name
+                                    break
+
+                        new_caption = f"{file_name}\n\n{message_to_send.text or ""}".strip()
+
                         self.send_file(
                             entity=destination_entity,
                             file=message_to_send.media,
-                            caption=message_to_send.text,
+                            caption=new_caption,
                             reply_to=destination_topic_id
                         )
                     elif message_to_send.text:
