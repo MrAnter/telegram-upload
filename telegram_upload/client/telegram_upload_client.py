@@ -355,6 +355,7 @@ class TelegramUploadClient(TelegramClient):
                 # Too many connections
                 click.echo(f'Too many connections to Telegram servers.', err=True)
             else:
+                self.upload_semaphore.release()
                 raise
         except ConnectionError:
             # Retry to send the file part
@@ -374,6 +375,7 @@ class TelegramUploadClient(TelegramClient):
             if progress_callback:
                 await helpers._maybe_await(progress_callback(pos, file_size))
         else:
+            self.upload_semaphore.release()
             raise RuntimeError(
                 'Failed to upload file part {}.'.format(part_index))
 

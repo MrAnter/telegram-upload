@@ -6,11 +6,11 @@ from datetime import datetime
 
 from telethon import TelegramClient, types
 from telethon.errors import FloodWaitError
-from telethon.tl.functions.channels import CreateForumTopicRequest
-from telethon.tl.types import MessageService, DocumentAttributeFilename, DocumentAttributeSticker, DocumentAttributeAnimated, DocumentAttributeAudio, DocumentAttributeImageSize, MessageMediaWebPage
+from telethon.tl.types import PeerChannel, PeerChat
+from telethon.tl.functions.channels import CreateForumTopicRequest, GetForumTopicsRequest
+from telethon.tl.types import MessageService, DocumentAttributeFilename, DocumentAttributeSticker, DocumentAttributeAnimated, DocumentAttributeAudio, DocumentAttributeImageSize, MessageMediaWebPage, ForumTopic
 
-FORWARDED_LOG_FILE = 'forwarded_messages.log'
-FORWARD_TIMESTAMPS_FILE = 'forward_timestamps.json'
+FORWARD_STATE_FILE = 'forward_state.json'
 
 
 class TelegramForwardClient(TelegramClient):
@@ -18,48 +18,134 @@ class TelegramForwardClient(TelegramClient):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.forwarded_ids = self._load_forwarded_ids()
-        click.echo(f"Loaded {len(self.forwarded_ids)} previously forwarded message IDs from '{FORWARDED_LOG_FILE}'.")
+        self._state = self._load_state()
 
-    def _load_forwarded_ids(self):
-        """Loads all forwarded message IDs from the log file into a set."""
-        if not os.path.exists(FORWARDED_LOG_FILE):
-            return set()
-        with open(FORWARDED_LOG_FILE, 'r') as f:
-            return {line.strip() for line in f if line.strip()}
+    # region State management
 
-    def _save_forwarded_ids(self, ids_to_save):
-        """Appends a set of successfully forwarded message IDs to the log file."""
-        with open(FORWARDED_LOG_FILE, 'a') as f:
-            for msg_id in ids_to_save:
-                f.write(f"{msg_id}\n")
+    def _load_state(self):
+        if os.path.exists(FORWARD_STATE_FILE):
+            try:
+                with open(FORWARD_STATE_FILE, 'r') as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, OSError):
+                click.echo(f"Warning: Could not read {FORWARD_STATE_FILE}. Starting fresh.", err=True)
+        return {'channels': {}, 'entity_cache': {}}
 
+    def _save_state(self):
+        with open(FORWARD_STATE_FILE, 'w') as f:
+            json.dump(self._state, f, indent=2)
+
+    # endregion
+
+    # region Entity resolution
 
     def _resolve_entity_with_flood_wait(self, chat_identifier):
         """Resolves a chat entity, handling FloodWaitError by waiting and retrying."""
-
         while True:
             try:
-                entity = self.get_entity(chat_identifier)
-                return entity
+                return self.get_entity(chat_identifier)
             except FloodWaitError as e:
                 click.echo(f"Flood wait error: sleeping for {e.seconds} seconds.", err=True)
                 time.sleep(e.seconds)
             except Exception as e:
+                # For supergroup/channel numeric IDs,
+                # Telethon needs a PeerChannel with the -100 prefix stripped.
+                str_id = str(chat_identifier)
+                if str_id.startswith('-100'):
+                    try:
+                        return self.get_entity(PeerChannel(int(str_id[4:])))
+                    except FloodWaitError as fe:
+                        click.echo(f"Flood wait error: sleeping for {fe.seconds} seconds.", err=True)
+                        time.sleep(fe.seconds)
+                        continue
+                    except Exception:
+                        pass
                 click.echo(f"Error: Could not resolve chat entity '{chat_identifier}'. Details: {e}", err=True)
                 return None
 
+    @staticmethod
+    def _is_external_identifier(key):
+        """Returns True for user-provided identifiers (URLs, usernames) worth logging."""
+        return isinstance(key, str) and (key.startswith('http') or key.startswith('t.me') or key.startswith('@'))
+
+    def get_entity(self, entity):
+        cache_key = str(entity)
+        if cache_key in self._state['entity_cache']:
+            cached_id = self._state['entity_cache'][cache_key]
+            if self._is_external_identifier(cache_key):
+                click.echo(f"[cache] '{cache_key}' → {cached_id}")
+            try:
+                return super().get_entity(PeerChannel(cached_id))
+            except Exception:
+                click.echo(f"[cache] '{cache_key}' stale, re-resolving...", err=True)
+                del self._state['entity_cache'][cache_key]
+        if self._is_external_identifier(cache_key):
+            click.echo(f"[cache] '{cache_key}' not in cache, resolving via API...")
+        result = super().get_entity(entity)
+        self._cache_entity(cache_key, result)
+        return result
+
+    async def get_input_entity(self, peer):
+        cache_key = str(peer)
+        if cache_key in self._state['entity_cache']:
+            cached_id = self._state['entity_cache'][cache_key]
+            if self._is_external_identifier(cache_key):
+                click.echo(f"[cache] '{cache_key}' → {cached_id}")
+            try:
+                return await super().get_input_entity(PeerChannel(cached_id))
+            except Exception:
+                click.echo(f"[cache] '{cache_key}' stale, re-resolving...", err=True)
+                del self._state['entity_cache'][cache_key]
+        if self._is_external_identifier(cache_key):
+            click.echo(f"[cache] '{cache_key}' not in cache, resolving via API...")
+        result = await super().get_input_entity(peer)
+        if self._is_external_identifier(cache_key):
+            entity_id = getattr(result, 'channel_id', None) or getattr(result, 'chat_id', None) or getattr(result, 'user_id', None)
+            if entity_id and cache_key not in self._state['entity_cache']:
+                self._state['entity_cache'][cache_key] = entity_id
+                self._save_state()
+                click.echo(f"[cache] '{cache_key}' added → {entity_id}")
+        return result
+
+    def _cache_entity(self, cache_key, entity):
+        if not self._is_external_identifier(cache_key):
+            return
+        entity_id = getattr(entity, 'id', None)
+        if entity_id and cache_key not in self._state['entity_cache']:
+            self._state['entity_cache'][cache_key] = entity_id
+            self._save_state()
+            click.echo(f"[cache] '{cache_key}' added → {entity_id}")
+
+    # endregion
+
+    # region Topic handling
 
     async def _get_or_create_topic_id(self, group_entity, topic_name):
         """Gets the ID of a topic, creating it if it doesn't exist."""
         click.echo(f"Searching topic '{topic_name}'...")
         topic_id = None
-        async for message in self.iter_messages(group_entity):
-            if message.action and isinstance(message.action, types.MessageActionTopicCreate):
-                if message.action.title == topic_name:
-                    topic_id = message.id
+        try:
+            result = await self(GetForumTopicsRequest(
+                channel=group_entity,
+                q=topic_name,
+                offset_date=0,
+                offset_id=0,
+                offset_topic=0,
+                limit=100,
+            ))
+            for topic in result.topics:
+                if isinstance(topic, ForumTopic) and topic.title == topic_name:
+                    topic_id = topic.id
                     click.echo(f"Found topic '{topic_name}' with ID: {topic_id}")
                     break
+        except Exception as e:
+            click.echo(f"Warning: GetForumTopicsRequest failed ({e}), falling back to message scan.", err=True)
+            async for message in self.iter_messages(group_entity):
+                if message.action and isinstance(message.action, types.MessageActionTopicCreate):
+                    if message.action.title == topic_name:
+                        topic_id = message.id
+                        click.echo(f"Found topic '{topic_name}' with ID: {topic_id}")
+                        break
 
         if topic_id is None:
             click.echo(f"Topic '{topic_name}' not found. Creating it...")
@@ -81,24 +167,7 @@ class TelegramForwardClient(TelegramClient):
                 return None
         return topic_id
 
-
-    def _load_timestamps(self):
-        """Loads last run timestamps from JSON file."""
-        if not os.path.exists(FORWARD_TIMESTAMPS_FILE):
-            return {}
-        try:
-            with open(FORWARD_TIMESTAMPS_FILE, 'r') as f:
-                return json.load(f)
-        except json.JSONDecodeError:
-            click.echo(f"Warning: Could not decode {FORWARD_TIMESTAMPS_FILE}. Starting fresh.", err=True)
-            return {}
-
-
-    def _save_timestamps(self, timestamps):
-        """Save the timestamp dictionary to the JSON file."""
-        with open(FORWARD_TIMESTAMPS_FILE, 'w') as f:
-            json.dump(timestamps, f, indent=4)
-
+    # endregion
 
     def forward_messages_from_chat(self, source_chat, destination_chat, files_only=False, topic_name=None):
         """
@@ -115,8 +184,10 @@ class TelegramForwardClient(TelegramClient):
         if not destination_entity:
             return 0
 
-        all_timestamps = self._load_timestamps()
-        last_run_timestamp = all_timestamps.get(str(source_entity.id), 0.0)
+        channel_key = str(source_entity.id)
+        channel_state = self._state['channels'].get(channel_key, {})
+        last_run_timestamp = channel_state.get('last_run', 0.0)
+        last_message_id = channel_state.get('last_message_id', 0)
         current_run_timestamp = time.time()
         click.echo(f"Checking for messages newer than: {datetime.fromtimestamp(last_run_timestamp)}")
 
@@ -140,18 +211,15 @@ class TelegramForwardClient(TelegramClient):
         chat_name = getattr(source_entity, 'title', getattr(source_entity, 'username', f"ID: {source_entity.id}"))
         click.echo(f"Fetching messages from '{chat_name}'...")
 
-        messages_iter = self.iter_messages(source_entity)
-        all_messages = list(messages_iter)
-
+        all_messages = list(self.iter_messages(source_entity))
         all_messages = [m for m in all_messages if m.action is None]
 
         if files_only:
+            skip_attrs = (DocumentAttributeSticker, DocumentAttributeAnimated,
+                          DocumentAttributeAudio, DocumentAttributeImageSize)
             all_messages = [
                 m for m in all_messages if m.document and
-                    not any(isinstance(attr, DocumentAttributeSticker) for attr in m.document.attributes) and
-                    not any(isinstance(attr, DocumentAttributeAnimated) for attr in m.document.attributes) and
-                    not any(isinstance(attr, DocumentAttributeAudio) for attr in m.document.attributes) and
-                    not any(isinstance(attr, DocumentAttributeImageSize) for attr in m.document.attributes)
+                not any(isinstance(attr, skip_attrs) for attr in m.document.attributes)
             ]
 
         if not all_messages:
@@ -161,10 +229,7 @@ class TelegramForwardClient(TelegramClient):
         messages_to_process = []
         processed_count = 0
         for msg in all_messages:
-            unique_id = f"{source_entity.id}:{msg.id}"
-            is_already_processed = unique_id in self.forwarded_ids
-
-            if not is_already_processed:
+            if msg.id > last_message_id:
                 messages_to_process.append(msg)
             elif msg.edit_date and msg.edit_date.timestamp() > last_run_timestamp:
                 click.echo(f"  - Detected edit for message {msg.id}. Queuing for re-sending.")
@@ -177,19 +242,17 @@ class TelegramForwardClient(TelegramClient):
 
         if not messages_to_process:
             click.echo("No new or newly edited messages to send.")
-            all_timestamps[str(source_entity.id)] = current_run_timestamp
-            self._save_timestamps(all_timestamps)
+            self._update_channel_state(channel_key, current_run_timestamp, last_message_id)
             return 0
 
-        new_messages = messages_to_process
-
-        new_messages.reverse()
+        messages_to_process.reverse()
 
         click.echo(
-            f"Found {len(new_messages)} new messages. Forwarding to '{getattr(destination_entity, 'title', destination_chat)}'...")
+            f"Found {len(messages_to_process)} new messages. Forwarding to '{getattr(destination_entity, 'title', destination_chat)}'...")
 
         total_forwarded_in_session = 0
-        for message_to_send in new_messages:
+        max_forwarded_id = last_message_id
+        for message_to_send in messages_to_process:
             while True:
                 try:
                     if message_to_send.media and not isinstance(message_to_send.media, types.MessageMediaWebPage):
@@ -200,7 +263,7 @@ class TelegramForwardClient(TelegramClient):
                                     file_name = attr.file_name
                                     break
 
-                        new_caption = f"{file_name}\n\n{message_to_send.text or ""}".strip()
+                        new_caption = f"{file_name}\n\n{message_to_send.text or ''}".strip()
 
                         self.send_file(
                             entity=destination_entity,
@@ -215,14 +278,12 @@ class TelegramForwardClient(TelegramClient):
                             reply_to=destination_topic_id
                         )
 
-                    unique_id = f"{source_entity.id}:{message_to_send.id}"
-                    if unique_id not in self.forwarded_ids:
-                        self._save_forwarded_ids({unique_id})
-                        self.forwarded_ids.add(unique_id)
+                    if message_to_send.id > max_forwarded_id:
+                        max_forwarded_id = message_to_send.id
                     total_forwarded_in_session += 1
 
-                    if total_forwarded_in_session % 100 == 0 or total_forwarded_in_session == len(new_messages):
-                        click.echo(f"  - Sent {total_forwarded_in_session}/{len(new_messages)} messages...")
+                    if total_forwarded_in_session % 100 == 0 or total_forwarded_in_session == len(messages_to_process):
+                        click.echo(f"  - Sent {total_forwarded_in_session}/{len(messages_to_process)} messages...")
 
                     break
 
@@ -233,8 +294,14 @@ class TelegramForwardClient(TelegramClient):
                     click.echo(f"An error occurred while sending message {message_to_send.id}: {e}", err=True)
                     break
 
-        all_timestamps[str(source_entity.id)] = current_run_timestamp
-        self._save_timestamps(all_timestamps)
+        self._update_channel_state(channel_key, current_run_timestamp, max_forwarded_id)
         click.echo(f"\nSuccessfully processed {total_forwarded_in_session} messages. Run timestamp updated.")
 
         return total_forwarded_in_session
+
+    def _update_channel_state(self, channel_key, last_run, last_message_id):
+        self._state['channels'][channel_key] = {
+            'last_run': last_run,
+            'last_message_id': last_message_id,
+        }
+        self._save_state()

@@ -65,4 +65,4 @@ target/
 *.session*
 /venv
 downloaded_files.txt
-forward_timestamps.json
+forward_state.json
