@@ -8,6 +8,7 @@ import click
 from telethon import TelegramClient, utils, helpers, custom
 from telethon.crypto import AES
 from telethon.errors import RPCError, FloodWaitError, InvalidBufferError
+from telethon.network import MTProtoSender
 from telethon.tl import types, functions, TLRequest
 from telethon.utils import pack_bot_file_id
 
@@ -16,7 +17,8 @@ from telegram_upload.exceptions import TelegramUploadDataLoss, MissingFileError
 from telegram_upload.upload_files import File
 from telegram_upload.utils import grouper, async_to_sync, get_environment_integer
 
-PARALLEL_UPLOAD_BLOCKS = get_environment_integer('TELEGRAM_UPLOAD_PARALLEL_UPLOAD_BLOCKS', 4)
+PARALLEL_UPLOAD_BLOCKS = get_environment_integer('TELEGRAM_UPLOAD_PARALLEL_UPLOAD_BLOCKS', 96)
+UPLOAD_SENDERS = get_environment_integer('TELEGRAM_UPLOAD_SENDERS', 8)
 ALBUM_FILES = 10
 RETRIES = 3
 MAX_RECONNECT_RETRIES = get_environment_integer('TELEGRAM_UPLOAD_MAX_RECONNECT_RETRIES', 5)
@@ -30,16 +32,33 @@ class TelegramUploadClient(TelegramClient):
     def __init__(self, *args, **kwargs):
         self.reconnecting_lock = asyncio.Lock()
         self.upload_semaphore = asyncio.Semaphore(self.parallel_upload_blocks)
+        self._upload_senders = []
         super().__init__(*args, **kwargs)
+
+    async def _upload_requesters(self):
+        # A single connection tops out around 55 Mbit/s no matter how many
+        # parts are in flight; throughput scales with connections instead.
+        while len(self._upload_senders) < UPLOAD_SENDERS - 1:
+            sender = MTProtoSender(self.session.auth_key, loggers=self._log)
+            await sender.connect(self._connection(
+                self.session.server_address, self.session.port, self.session.dc_id,
+                loggers=self._log, proxy=self._proxy, local_addr=self._local_addr))
+            self._upload_senders.append(sender)
+        return [self, *self._upload_senders]
+
+    async def _close_upload_senders(self):
+        senders, self._upload_senders = self._upload_senders, []
+        await asyncio.gather(*(s.disconnect() for s in senders), return_exceptions=True)
 
     def forward_to(self, message, destinations):
         for destination in destinations:
             self.forward_messages(destination, [message])
 
-    async def _send_album_media(self, entity, media):
+    async def _send_album_media(self, entity, media, reply_to=None):
         entity = await self.get_input_entity(entity)
         request = functions.messages.SendMultiMediaRequest(
-            entity, multi_media=media, silent=None, schedule_date=None, clear_draft=None
+            entity, multi_media=media, silent=None, schedule_date=None, clear_draft=None,
+            reply_to=types.InputReplyToMessage(reply_to_msg_id=reply_to) if reply_to else None,
         )
         result = await self(request)
 
@@ -47,10 +66,18 @@ class TelegramUploadClient(TelegramClient):
         return self._get_response_message(random_ids, result, entity)
 
     def send_files_as_album(self, entity, files, delete_on_success=False, print_file_id=False,
-                            forward=()):
+                            forward=(), comment_to_v=None):
+        reply_to = None
+        if comment_to_v is not None:
+            # Comments live in the linked discussion group, as replies to the
+            # forwarded copy of the post.
+            entity, reply_to = async_to_sync(self._get_comment_data(entity, comment_to_v))
         for files_group in grouper(ALBUM_FILES, files):
             media = self.send_files(entity, files_group, delete_on_success, print_file_id, forward, send_as_media=True)
-            async_to_sync(self._send_album_media(entity, media))
+            # Only the first item keeps the caption, or Telegram repeats it.
+            for m in media[1:]:
+                m.message = ''
+            async_to_sync(self._send_album_media(entity, media, reply_to))
 
     def _send_file_message(self, entity, file, thumb, progress, comment_to):
         message = self.send_file(entity, file, thumb=thumb,
@@ -68,11 +95,15 @@ class TelegramUploadClient(TelegramClient):
         message = self.send_file(entity, None, caption=text, progress_callback=progress, comment_to=comment_to)
         return message
 
-    async def _send_media(self, entity, file: File, progress):
+    async def _send_media(self, entity, file: File, progress, thumb=None):
         entity = await self.get_input_entity(entity)
-        supports_streaming = False  # TODO
+        # file_size is needed for large streams; attributes and
+        # supports_streaming make it a playable video, not an attachment.
+        supports_streaming = not file.force_file
         fh, fm, _ = await self._file_to_media(
-            file, supports_streaming=file, progress_callback=progress)
+            file, file_size=file.file_size, progress_callback=progress,
+            attributes=file.file_attributes, thumb=thumb,
+            force_document=file.force_file, supports_streaming=supports_streaming)
         if isinstance(fm, types.InputMediaUploadedPhoto):
             r = await self(functions.messages.UploadMediaRequest(
                 entity, media=fm
@@ -89,7 +120,7 @@ class TelegramUploadClient(TelegramClient):
 
         return types.InputSingleMedia(
             fm,
-            message=file.short_name,
+            message=file.file_caption,
             entities=None,
             # random_id is autogenerated
         )
@@ -103,7 +134,7 @@ class TelegramUploadClient(TelegramClient):
             try:
                 # TODO: remove distinction?
                 if send_as_media:
-                    message = async_to_sync(self._send_media(entity, file, progress))
+                    message = async_to_sync(self._send_media(entity, file, progress, thumb))
                 else:
                     #message = self._send_text_message(entity, "Bho", progress, comment_to)
                     message = self._send_file_message(entity, file, thumb, progress, comment_to)
@@ -278,10 +309,14 @@ class TelegramUploadClient(TelegramClient):
             self._log[__name__].info('Uploading file of %d bytes in %d chunks of %d',
                                     file_size, part_count, part_size)
 
+            requesters = await self._upload_requesters() if is_big else [self]
             pos = 0
             for part_index in range(part_count):
-                # Read the file by in chunks of size part_size
-                part = await helpers._maybe_await(stream.read(part_size))
+                # Read the file by in chunks of size part_size. Reading in a
+                # thread keeps the event loop free: a blocking read stalls the
+                # parts already in flight waiting for their response.
+                part = await helpers._maybe_await(
+                    await asyncio.to_thread(stream.read, part_size))
 
                 if not isinstance(part, bytes):
                     raise TypeError(
@@ -317,13 +352,16 @@ class TelegramUploadClient(TelegramClient):
                         file_id, part_index, part)
                 await self.upload_semaphore.acquire()
                 self.loop.create_task(
-                    self._send_file_part(request, part_index, part_count, pos, file_size, progress_callback),
+                    self._send_file_part(request, part_index, part_count, pos, file_size,
+                                        progress_callback,
+                                        requester=requesters[part_index % len(requesters)]),
                     name=f"telegram-upload-file-{part_index}"
                 )
             # Wait for all tasks to finish
             await asyncio.wait([
                 task for task in asyncio.all_tasks() if task.get_name().startswith(f"telegram-upload-file-")
             ])
+            await self._close_upload_senders()
         if is_big:
             return types.InputFileBig(file_id, part_count, file_name)
         else:
@@ -334,7 +372,8 @@ class TelegramUploadClient(TelegramClient):
     # endregion
 
     async def _send_file_part(self, request: TLRequest, part_index: int, part_count: int, pos: int, file_size: int,
-                              progress_callback: Optional['hints.ProgressCallback'] = None, retry: int = 0) -> None:
+                              progress_callback: Optional['hints.ProgressCallback'] = None, retry: int = 0,
+                              requester=None) -> None:
         """
         Submit the file request part to Telegram. This method waits for the request to be executed, logs the upload,
         and releases the semaphore to allow further uploading.
@@ -345,11 +384,13 @@ class TelegramUploadClient(TelegramClient):
         :param pos: Number of part as integer. Used for progress bar.
         :param file_size: Total file size. Used for progress bar.
         :param progress_callback: Callback to use after submit the request. Optional.
+        :param requester: Connection to send the request through. Defaults to the client.
         :return: None
         """
+        requester = requester or self
         result = None
         try:
-            result = await self(request)
+            result = await (requester(request) if requester is self else requester.send(request))
         except InvalidBufferError as e:
             if e.code == 429:
                 # Too many connections

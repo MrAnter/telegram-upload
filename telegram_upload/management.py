@@ -190,7 +190,8 @@ def upload(files, to, config, delete_on_success, print_file_id, force_file, forw
     elif sort:
         files = sorted(files, key=lambda x: x.name)
     if album:
-        client.send_files_as_album(to, files, delete_on_success, print_file_id, forward)
+        client.send_files_as_album(to, files, delete_on_success, print_file_id, forward,
+                                   comment_to_v=int(comment_to) if comment_to != None else None)
     else:
         client.send_files(to, files, delete_on_success, print_file_id, forward,
         comment_to_v=int(comment_to) if comment_to != None else None)
