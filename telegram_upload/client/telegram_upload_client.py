@@ -420,6 +420,18 @@ class TelegramUploadClient(TelegramClient):
             raise RuntimeError(
                 'Failed to upload file part {}.'.format(part_index))
 
+    async def _update_loop(self) -> None:
+        """Skip Telethon's update loop when updates are disabled.
+
+        Telethon starts it on every connect even with receive_updates=False, so
+        each reconnection leaves one more loop running on the same MessageBox.
+        Two of them racing make apply_difference raise, killing the upload after
+        the file has already been sent. An uploader never reads updates anyway.
+        """
+        if self._no_updates:
+            return
+        await super()._update_loop()
+
     def decrease_upload_semaphore(self):
         """
         Decreases the upload semaphore by one. This method is used to reduce the number of parallel uploads.
