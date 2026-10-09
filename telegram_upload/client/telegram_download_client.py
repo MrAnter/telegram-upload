@@ -27,10 +27,17 @@ PARALLEL_DOWNLOAD_BLOCKS = get_environment_integer('TELEGRAM_UPLOAD_PARALLEL_DOW
 
 
 class TelegramDownloadClient(TelegramClient):
-    def find_files(self, entity):
-        for message in self.iter_messages(entity):
+    def find_files(self, entity, limit=None):
+        # limit=None scans the whole history; a number only looks at the latest messages
+        for message in self.iter_messages(entity, limit=limit):
             if message.document:
                 yield message
+
+    def get_file_messages(self, entity, message_ids):
+        """Return the messages with the given ids that contain a file. Missing or
+        deleted messages are skipped."""
+        messages = self.get_messages(entity, ids=list(message_ids))
+        return [message for message in messages if message is not None and message.document]
 
     async def iter_files(self, entity):
         async for message in self.iter_messages(entity=entity):
@@ -40,6 +47,8 @@ class TelegramDownloadClient(TelegramClient):
     def download_files(self, entity, download_files: Iterable[DownloadFile], delete_on_success: bool = False, check_exist: bool = False, mark_downloaded: bool = False):
         download_files_txt_path = "./downloaded_files.txt"
         already_downloaded = False
+        # Files actually downloaded in this call, so callers can report the final paths
+        downloaded = []
         for download_file in download_files:
             if check_exist:
                 already_downloaded = False
@@ -71,6 +80,7 @@ class TelegramDownloadClient(TelegramClient):
                         bar.label = f'Downloaded  "{file_name}"'
                         bar.update(1, 1)
                         bar.render_finish()
+                    downloaded.append(download_file)
                     if delete_on_success:
                         self.delete_messages(entity, [download_file.message])
                 # Mark the file as downloaded
@@ -78,6 +88,7 @@ class TelegramDownloadClient(TelegramClient):
                     with open(download_files_txt_path, 'a') as file:
                         file.write(f'{download_file.file_name}\n')
                     print(f'File "{download_file.file_name}" added to the downloaded files list.')
+        return downloaded
 
     async def _download_file(
             self: 'TelegramClient',

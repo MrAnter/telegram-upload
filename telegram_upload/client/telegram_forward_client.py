@@ -10,7 +10,9 @@ from telethon.tl.types import PeerChannel, PeerChat
 from telethon.tl.functions.channels import CreateForumTopicRequest, GetForumTopicsRequest
 from telethon.tl.types import MessageService, DocumentAttributeFilename, DocumentAttributeSticker, DocumentAttributeAnimated, DocumentAttributeAudio, DocumentAttributeImageSize, MessageMediaWebPage, ForumTopic
 
-FORWARD_STATE_FILE = 'forward_state.json'
+# Relative to the working directory by default; scripts that run the client from a
+# download folder can point it elsewhere so the state file does not end up among the media.
+FORWARD_STATE_FILE = os.environ.get('TELEGRAM_UPLOAD_FORWARD_STATE', 'forward_state.json')
 
 
 class TelegramForwardClient(TelegramClient):

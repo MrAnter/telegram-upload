@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 """Console script for telegram-upload."""
+import json
 import os
 import time
 
@@ -219,7 +220,16 @@ def upload(files, to, config, delete_on_success, print_file_id, force_file, forw
               help='Set all the files as downloaded.')
 @click.option('--contains', multiple=True,
               help='Filter files by name. Only files containing these words will be downloaded.')
-def download(from_, config, delete_on_success, proxy, split_files, interactive, check_exist, mark_downloaded, contains):
+@click.option('--limit', type=int, default=None,
+              help='Only look at the latest N messages of the chat instead of the whole history.')
+@click.option('--message-id', 'message_ids', type=int, multiple=True,
+              help='Download only the message with this id (can be repeated). Skips the history scan.')
+@click.option('--list', 'list_only', is_flag=True,
+              help='Do not download anything: print the matching files (implies --json).')
+@click.option('--json', 'json_output', is_flag=True,
+              help='Print one JSON object per line (listed or downloaded file) for scripts.')
+def download(from_, config, delete_on_success, proxy, split_files, interactive, check_exist, mark_downloaded, contains,
+             limit, message_ids, list_only, json_output):
     """Download all the latest messages that are files in a chat, by default download
     from "saved messages". It is recommended to forward the files to download to
     "saved messages" and use parameter ``--delete-on-success``. Forwarded messages will
@@ -239,12 +249,52 @@ def download(from_, config, delete_on_success, proxy, split_files, interactive, 
         click.echo('Select all files to download:')
         click.echo('[SPACE] Select files [ENTER] Download selected files')
         messages = async_to_sync(interactive_select_files(client, from_))
-    else:
-        messages = client.find_files(from_)
+    elif message_ids:
+        messages = client.get_file_messages(from_, message_ids)
         messages = filter_messages_by_name(messages, contains)
+    else:
+        messages = client.find_files(from_, limit=limit)
+        messages = filter_messages_by_name(messages, contains)
+    if list_only:
+        for message in messages:
+            click.echo(json.dumps(message_file_info(message), ensure_ascii=False))
+        return
     messages_cls = DOWNLOAD_SPLIT_FILE_MODES[split_files]
     download_files = messages_cls(reversed(list(messages)))
-    client.download_files(from_, download_files, delete_on_success, check_exist, mark_downloaded)
+    downloaded = client.download_files(from_, download_files, delete_on_success, check_exist, mark_downloaded)
+    if json_output:
+        for download_file in downloaded or []:
+            info = message_file_info(download_file.message)
+            info['path'] = os.path.abspath(download_file.downloaded_file_name)
+            click.echo(json.dumps(info, ensure_ascii=False))
+
+
+def message_link(message):
+    """Public link of a message: t.me/<username>/<id> for public chats,
+    t.me/c/<internal id>/<id> for private ones (works only for members)."""
+    chat = getattr(message, 'chat', None)
+    username = getattr(chat, 'username', None)
+    if username:
+        return f'https://t.me/{username}/{message.id}'
+    chat_id = getattr(message.peer_id, 'channel_id', None) or getattr(message.peer_id, 'chat_id', None)
+    return f'https://t.me/c/{chat_id}/{message.id}' if chat_id else None
+
+
+def message_file_info(message):
+    """Data about a file message, as printed by --list and --json."""
+    file_attribute = get_message_file_attribute(message)
+    return {
+        'id': message.id,
+        'file_name': getattr(file_attribute, 'file_name', None),
+        'size': message.document.size,
+        # A file re-uploaded into the same message (edit) gets a new document id,
+        # while a caption-only edit keeps it: scripts can tell the two apart.
+        'document_id': message.document.id,
+        'date': message.date.isoformat() if message.date else None,
+        'edit_date': message.edit_date.isoformat() if message.edit_date else None,
+        'caption': message.message or '',
+        'link': message_link(message),
+    }
 
 
 @click.command()
